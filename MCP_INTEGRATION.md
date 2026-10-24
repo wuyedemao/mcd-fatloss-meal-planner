@@ -114,6 +114,40 @@ foods[3]{code,name,energyKcal,protein,fat,carbohydrate,sodium}:
 
 ---
 
+## 4.1 商品编码、菜名、价格的三处断点（实测）
+
+三个接口各自只给一半信息，串不起来——这是接入过程中最花时间的地方：
+
+| 接口 | 给了什么 | 缺什么 |
+| --- | --- | --- |
+| `list-nutrition-foods` | `productName` + 全部营养字段 | **商品编码** |
+| `query-meals` | `{"code":"9900014838","tags":[...]}`，15 个分类共 129 个编码 | **菜名、价格** |
+| `query-meal-detail` | `code / name / rounds / image`，套餐组成与换料差价 | **单品售价**（只有 `diffPrice`，如「换燕麦奶 +¥2」） |
+| `calculate-price` | `productList[]`，每项含 `productName` + `subtotal`（分） | 需要传 `productCode` |
+
+所以价格链路只能是：
+
+```
+query-meals → 129 个编码
+  → calculate-price(items=[{productCode, quantity:1}]) 分批（40 个/批）
+  → 从 productList 取 productName + subtotal
+  → 按归一化菜名与营养表对齐 → 建立「菜名 → 单价」
+```
+
+两个坑值得记下来：
+
+1. **`query-meal-detail` 没有单品价格。** 深度遍历解析时很容易先撞上
+   `rounds[].choices[].modification.values[].price`，把「换燕麦奶 2 元」当成商品价，
+   表现是"有价格但全都对不上"。
+2. **价格字段叫 `subtotal`**，不是 `price`。响应顶层还有个 `price: 140480`（整单合计，单位分），
+   按 `price` 取会把整单金额当成单品价。
+
+另外，菜单里大量是「三件套」「双人餐」这类组合名，营养表里只有单品，
+两边名称并不能完全对齐。因此当价格数据可用时，本项目会把候选池收敛到「能算出价格」的餐品，
+保证推出来的每一份套餐都能报出总价；匹配不足 8 项时退回全量候选，只标注「N/M 项有价」。
+
+---
+
 ## 5. 业务价值
 
 ### 对用户
