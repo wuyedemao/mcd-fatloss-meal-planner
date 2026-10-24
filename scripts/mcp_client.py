@@ -211,7 +211,28 @@ if __name__ == "__main__":
     ap.add_argument("--dump", metavar="TOOL", help="调用指定工具并把原始返回存成文件，如 list-nutrition-foods")
     ap.add_argument("--out", default=None, help="保存路径，默认 docs/_raw/<tool>.txt")
     ap.add_argument("--args", default="{}", help="工具入参 JSON，默认 {}")
+    ap.add_argument("--tools", action="store_true", help="导出全部工具的入参 schema 到 docs/_raw/tools.json")
     ns = ap.parse_args()
+
+    if ns.tools:
+        import os
+
+        try:
+            client = McdMcpClient()
+            client.initialize()
+            tools = client.list_tools()
+            os.makedirs(os.path.join("docs", "_raw"), exist_ok=True)
+            out = os.path.join("docs", "_raw", "tools.json")
+            with open(out, "w", encoding="utf-8") as fh:
+                json.dump(tools, fh, ensure_ascii=False, indent=2)
+            print("共 %d 个工具，已保存 -> %s" % (len(tools), out))
+            for t in tools:
+                props = list((t.get("inputSchema") or {}).get("properties", {}).keys())
+                print("  %-24s %s" % (t.get("name"), props))
+        except McpError as exc:
+            print(f"[失败] {exc}")
+            raise SystemExit(1)
+        raise SystemExit(0)
 
     if ns.dump:
         import os

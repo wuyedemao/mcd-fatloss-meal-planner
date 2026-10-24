@@ -550,6 +550,29 @@ def _norm_name(value: str) -> str:
     return re.sub(r"[\s\u3000（）()\[\]【】「」『』\"'“”]", "", str(value)).lower()
 
 
+_COUPON_PRICE = re.compile(r"(\d+(?:\.\d+)?)\s*元\s*(.+)$")
+
+
+def parse_coupon_name(name: str) -> tuple[float | None, str | None]:
+    """从券名里抽出「券价 + 商品名」。
+
+    麦当劳 available-coupons 不返回价格字段，价格写在 couponName 里：
+        「11.9元麦辣鸡腿堡」 -> (11.9, 麦辣鸡腿堡)
+        「免费脆薯饼」        -> (0.0, 脆薯饼)
+        「19.9元王牌炸鸡任选2」-> (19.9, 王牌炸鸡任选2)  ← 组合券，对不上单品
+    """
+    text = str(name or "").strip()
+    if not text:
+        return None, None
+    if text.startswith("免费"):
+        product = text[2:].strip()
+        return 0.0, product or None
+    match = _COUPON_PRICE.search(text)
+    if match:
+        return float(match.group(1)), match.group(2).strip() or None
+    return None, None
+
+
 def build_coupon_index(payload) -> dict:
     """把券列表压成两张表：按商品编码、按商品名称。
 
@@ -565,8 +588,15 @@ def build_coupon_index(payload) -> dict:
         code = _pick(record, "productCode", "code", "mealCode", "skuCode", "couponProductCode")
         name = _pick(record, "productName", "couponName", "name", "title", "mealName")
         price = _pick(record, "couponPrice", "price", "salePrice", "amount", "discountPrice")
+        name_value = str(name) if name else ""
         if price in (None, ""):
-            continue
+            parsed_price, parsed_product = parse_coupon_name(name_value)
+            if parsed_price is not None:
+                price = parsed_price
+                if parsed_product:
+                    name = parsed_product
+            else:
+                continue
         value = _num(price)
         # 官方说明价格单位为「分」；小于 100 的数值按「元」兜底，避免不同接口单位不一致
         cents = int(round(value * 100)) if value < 100 else int(round(value))
