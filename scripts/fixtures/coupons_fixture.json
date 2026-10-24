@@ -1,0 +1,14 @@
+{
+  "_note": "离线演示数据。字段结构对齐麦当劳 MCP available-coupons / query-store-coupons 的返回形态，券价单位为分。真实使用时由 MCP 实时返回，不读取本文件。",
+  "coupons": [
+    { "couponId": "C-1001", "couponName": "巨无霸单品券", "productCode": "1001", "couponPrice": 1290, "threshold": 0 },
+    { "couponId": "C-1003", "couponName": "麦辣鸡腿堡单品券", "productCode": "1003", "couponPrice": 990, "threshold": 0 },
+    { "couponId": "C-1004", "couponName": "板烧鸡腿堡单品券", "productCode": "1004", "couponPrice": 1390, "threshold": 0 },
+    { "couponId": "C-1102", "couponName": "麦乐鸡5块券", "productCode": "1102", "couponPrice": 990, "threshold": 0 },
+    { "couponId": "C-1202", "couponName": "中薯条券", "productCode": "1202", "couponPrice": 600, "threshold": 0 },
+    { "couponId": "C-1204", "couponName": "玉米杯券", "productCode": "1204", "couponPrice": 500, "threshold": 0 },
+    { "couponId": "C-1301", "couponName": "中杯可乐券", "productCode": "1301", "couponPrice": 300, "threshold": 0 },
+    { "couponId": "C-1305", "couponName": "纯牛奶券", "productCode": "1305", "couponPrice": 500, "threshold": 0 },
+    { "couponId": "C-1502", "couponName": "吉士蛋麦满分早餐券", "productCode": "1502", "couponPrice": 890, "threshold": 0 }
+  ]
+}
