@@ -589,8 +589,9 @@ def collect_menu_codes(payload) -> list[str]:
     return ordered
 
 
-_PRICE_KEYS = ("salePrice", "price", "currentPrice", "unitPrice",
-               "totalAmount", "payAmount", "totalPrice", "amount")
+# calculate-price 的 productList 用的是 subtotal（实付）和 originalSubtotal（原价，分）
+_PRICE_KEYS = ("subtotal", "productPrice", "salePrice", "currentPrice", "unitPrice",
+               "originalSubtotal", "totalAmount", "payAmount", "totalPrice", "price", "amount")
 
 
 def price_index_from_calculate(payload) -> dict:
@@ -601,7 +602,8 @@ def price_index_from_calculate(payload) -> dict:
     index: dict = {}
     for node in _walk_dicts(smart_parse(payload)):
         name = node.get("productName") or node.get("mealName") or node.get("name")
-        if not name:
+        code = node.get("productCode") or node.get("code")
+        if not name and not code:
             continue
         for key in _PRICE_KEYS:
             if key not in node:
@@ -610,8 +612,11 @@ def price_index_from_calculate(payload) -> dict:
             if value <= 0:
                 continue
             cents = int(round(value * 100)) if value < 100 else int(round(value))
-            if 100 <= cents <= 20000:
-                index[_norm_name(str(name))] = cents
+            if 100 <= cents <= 50000:
+                if name:
+                    index[_norm_name(str(name))] = cents
+                if code:
+                    index[str(code)] = cents
             break
     return index
 
@@ -877,6 +882,7 @@ def load_live(store_code: str | None = None, city: str | None = None, keyword: s
         return text
 
     price_cache_path = os.path.join(raw_dir, "_price_index.json")
+    price_cache_version = 2
 
     def resolve_prices(store: str) -> dict:
         """价格只能由 calculate-price 算出来。
@@ -893,7 +899,8 @@ def load_live(store_code: str | None = None, city: str | None = None, keyword: s
         try:
             with open(price_cache_path, encoding="utf-8") as fh:
                 cached = json.load(fh)
-            if cached.get("store") == store and cached.get("codes") == codes:
+            if (cached.get("v") == price_cache_version and cached.get("store") == store
+                    and cached.get("codes") == codes):
                 return cached.get("index", {})
             cache = cached.get("index", {})
         except (OSError, json.JSONDecodeError):
@@ -927,7 +934,8 @@ def load_live(store_code: str | None = None, city: str | None = None, keyword: s
 
         try:
             with open(price_cache_path, "w", encoding="utf-8") as fh:
-                json.dump({"store": store, "codes": codes, "index": index}, fh, ensure_ascii=False)
+                json.dump({"v": price_cache_version, "store": store, "codes": codes, "index": index},
+                          fh, ensure_ascii=False)
         except OSError:
             pass
         sys.stderr.write("[价格] 已建立 %d 条价格映射\n" % len(index))
@@ -1022,6 +1030,19 @@ def main(argv: list[str] | None = None) -> int:
         items, price_index, coupon_index, source = load_fixture()
 
     items = filter_by_meal(items, args.meal)
+
+    # 拿到真实价格时，只从「能算出价格」的餐品里选，保证推荐的每一项都报得出价钱。
+    # 匹配太少（<8 项）就不做限制，宁可显示部分价格，也不把候选池砍残。
+    if price_index:
+        priced_names = {k for k in price_index if not k.isdigit()}
+        matched = [i for i in items if _norm_name(i.name) in priced_names]
+        if len(matched) >= 8:
+            sys.stderr.write("[价格] 可定价餐品 %d/%d 项，候选池已按此收敛\n" % (len(matched), len(items)))
+            sys.stderr.flush()
+            items = matched
+        else:
+            sys.stderr.write("[价格] 仅 %d 项能对上价格，保留全量候选\n" % len(matched))
+            sys.stderr.flush()
 
     plans = build_plans(items, budget["budget_kcal"], top=3,
                         tolerance=budget["tolerance"], allow_dessert=args.allow_dessert)
