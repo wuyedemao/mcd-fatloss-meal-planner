@@ -21,7 +21,7 @@
 | 热量预算 | 拍一个"减脂吃 500 大卡" | Mifflin-St Jeor 算 BMR → TDEE → 按周减重比例推缺口，再拆到餐次 |
 | 营养数据 | 模型记忆，经常不准 | 实时调用 `list-nutrition-foods`，解析 MCP 返回的 **toon** 格式 |
 | 选餐 | 挑一个"看起来健康"的堡 | 在热量窗口内做组合搜索，蛋白质密度、钠、脂肪一起算分 |
-| 价格 | 不给，或瞎报 | `available-coupons` 拿券价、`query-meals` 拿菜单价，算清省多少 |
+| 价格 | 不给，或瞎报 | `query-meals` 拿编码 → `calculate-price` 算真实总价，`available-coupons` 并行算券价 |
 | 安全边界 | 用户要 500 大卡就配 500 大卡 | 三道护栏拦下极端节食，BMI 过低直接不给减脂方案 |
 
 ---
