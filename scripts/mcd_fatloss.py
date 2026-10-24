@@ -545,6 +545,69 @@ def build_plans(
 # ---------------------------------------------------------------------------
 
 
+_COMBO_HINTS = ("单人餐", "多人餐", "拼盘", "随心配", "乐园", "套餐")
+
+
+def _walk_dicts(obj):
+    if isinstance(obj, dict):
+        yield obj
+        for value in obj.values():
+            yield from _walk_dicts(value)
+    elif isinstance(obj, list):
+        for value in obj:
+            yield from _walk_dicts(value)
+
+
+def collect_menu_codes(payload) -> list[str]:
+    """从 query-meals 里按「单品 → 饮品 → 组合餐」的顺序取出商品编码。
+
+    query-meals 只返回 code 和 tags，没有菜名也没有价格，所以排序很重要：
+    详情接口有调用上限，得先保证主食和小食被覆盖，饮品次之，套餐放最后。
+    """
+    primary: list[str] = []
+    secondary: list[str] = []
+    rest: list[str] = []
+    for node in _walk_dicts(smart_parse(payload)):
+        meals = node.get("meals")
+        cat = node.get("name")
+        if not isinstance(meals, list) or not cat:
+            continue
+        target = rest
+        if any(w in str(cat) for w in ("饮品", "咖啡", "饮料")):
+            target = secondary
+        elif not any(w in str(cat) for w in _COMBO_HINTS):
+            target = primary
+        for meal in meals:
+            if isinstance(meal, dict) and meal.get("code"):
+                target.append(str(meal["code"]))
+
+    ordered, seen = [], set()
+    for code in primary + secondary + rest:
+        if code not in seen:
+            seen.add(code)
+            ordered.append(code)
+    return ordered
+
+
+def parse_meal_detail(payload) -> dict:
+    """从餐品详情里抠出「名称 + 价格(分)」，抠不到就返回空字典。"""
+    result: dict = {}
+    for node in _walk_dicts(smart_parse(payload)):
+        name = _pick(node, "productName", "mealName", "title", "name", contains=("name",))
+        price = _pick(node, "salePrice", "price", "originalPrice", "currentPrice", "amount")
+        if not name:
+            continue
+        result.setdefault("name", str(name))
+        if price in (None, ""):
+            continue
+        value = _num(price)
+        if value <= 0:
+            continue
+        cents = int(round(value * 100)) if value < 100 else int(round(value))
+        return {"name": str(name), "price_cents": cents}
+    return result
+
+
 def _norm_name(value: str) -> str:
     """菜名归一化：去掉空格、全角括号、书名号，便于跨接口按名字对齐。"""
     return re.sub(r"[\s\u3000（）()\[\]【】「」『』\"'“”]", "", str(value)).lower()
@@ -785,7 +848,8 @@ def load_fixture() -> tuple[list[Item], dict, dict, str]:
     return items, prices, coupons, "离线演示数据（fixtures/，非官方实时数据，仅用于流程验证）"
 
 
-def load_live(store_code: str | None = None, city: str | None = None, keyword: str | None = None):
+def load_live(store_code: str | None = None, city: str | None = None, keyword: str | None = None,
+              max_detail: int = 150):
     from mcp_client import McdMcpClient, McpError  # 延迟导入，离线模式下不需要
 
     client = McdMcpClient()
@@ -803,6 +867,69 @@ def load_live(store_code: str | None = None, city: str | None = None, keyword: s
         except OSError:
             pass
         return text
+
+    detail_cache_path = os.path.join(raw_dir, "_detail_cache.json")
+
+    def resolve_prices(store: str) -> dict:
+        """query-meals 只有编码，营养表只有菜名，靠逐条 query-meal-detail 打通。
+
+        结果缓存到本地，第二次跑直接读缓存，不再重复调用。
+        """
+        menu_text = fetch("query-meals", {"storeCode": store, "orderType": 1, "beType": 1})
+        codes = collect_menu_codes(menu_text)
+        if not codes:
+            return {}
+
+        cache: dict = {}
+        try:
+            with open(detail_cache_path, encoding="utf-8") as fh:
+                cache = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            cache = {}
+
+        index: dict = {}
+        fetched = 0
+        for code in codes:
+            entry = cache.get(code)
+            if entry is None:
+                if fetched >= max_detail:
+                    break
+                try:
+                    text = client.call_tool(
+                        "query-meal-detail",
+                        {"storeCode": store, "orderType": 1, "beType": 1, "code": code},
+                    )
+                except McpError:
+                    continue
+                if fetched == 0:
+                    try:
+                        with open(os.path.join(raw_dir, "meal_detail_sample.txt"), "w", encoding="utf-8") as fh:
+                            fh.write(text)
+                    except OSError:
+                        pass
+                fetched += 1
+                entry = parse_meal_detail(text) or {"_empty": True}
+                cache[code] = entry
+                if fetched % 25 == 0:
+                    sys.stderr.write("[价格] 已拉取 %d/%d 条餐品详情\n" % (fetched, min(len(codes), max_detail)))
+                    sys.stderr.flush()
+
+            if not entry or entry.get("_empty"):
+                continue
+            cents = entry.get("price_cents")
+            if cents:
+                index[code] = cents
+                if entry.get("name"):
+                    index[_norm_name(entry["name"])] = cents
+
+        try:
+            with open(detail_cache_path, "w", encoding="utf-8") as fh:
+                json.dump(cache, fh, ensure_ascii=False)
+        except OSError:
+            pass
+        sys.stderr.write("[价格] 已建立 %d 条价格映射\n" % len(index))
+        sys.stderr.flush()
+        return index
 
     nutrition_text = fetch("list-nutrition-foods")
     items = normalize_items(nutrition_text)
@@ -836,9 +963,7 @@ def load_live(store_code: str | None = None, city: str | None = None, keyword: s
                 resolved_store = str(_pick(stores[0], "storeCode", "code", "id") or "")
         if resolved_store:
             # 到店自取：orderType=1 / beType=1，beCode 不要传（传了会报错）
-            price_index = build_price_index(
-                fetch("query-meals", {"storeCode": resolved_store, "orderType": 1, "beType": 1})
-            )
+            price_index = resolve_prices(resolved_store)
     except McpError:
         price_index = {}
 
@@ -869,6 +994,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--store-code", default=None, help="门店编码，用于拉菜单价与门店可用券")
     parser.add_argument("--city", default=None, help="城市名，用于查门店从而拿到真实售价")
     parser.add_argument("--keyword", default=None, help="门店关键词，配合 --city 缩小范围")
+    parser.add_argument("--max-detail", type=int, default=150, help="最多拉取多少个餐品详情来对齐价格，默认 150")
     parser.add_argument("--live", action="store_true", help="调用真实麦当劳 MCP（需要 MCD_MCP_TOKEN）")
     parser.add_argument("--json", action="store_true", help="输出 JSON，便于被上游 Agent 消费")
     parser.add_argument("--out", default=None, help="把 Markdown 结果写入文件")
@@ -887,7 +1013,7 @@ def main(argv: list[str] | None = None) -> int:
     budget = meal_budget(energy["target_kcal"], args.meal)
 
     if args.live:
-        items, price_index, coupon_index, source = load_live(args.store_code, args.city, args.keyword)
+        items, price_index, coupon_index, source = load_live(args.store_code, args.city, args.keyword, args.max_detail)
     else:
         items, price_index, coupon_index, source = load_fixture()
 
