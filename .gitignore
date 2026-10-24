@@ -3,7 +3,6 @@ __pycache__/
 .venv/
 venv/
 .env
-docs/live-output.md
 .DS_Store
 Thumbs.db
 
