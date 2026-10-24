@@ -139,10 +139,13 @@ def test_plans() -> None:
 
 def test_pricing() -> None:
     print("[价格与优惠券]")
-    raw = {"coupons": [{"couponId": "C1", "productCode": "1001", "couponPrice": 1290},
-                       {"couponId": "C2", "productCode": "1001", "couponPrice": 1590}]}
+    raw = {"coupons": [{"couponId": "C1", "productCode": "1001", "couponPrice": 1290,
+                         "couponName": "巨无霸单品券"},
+                        {"couponId": "C2", "productCode": "1001", "couponPrice": 1590,
+                         "couponName": "巨无霸超值券"}]}
     index = build_coupon_index(raw)
-    check("同一商品取最低券价", index.get("1001") == 1290)
+    check("券同时建立名称索引", index["by_name"].get("巨无霸单品券") == 1290)
+    check("同一商品取最低券价", index["by_code"].get("1001") == 1290)
 
     menu = build_price_index({"list": [{"code": "1001", "price": 2450}]})
     check("菜单价（分）解析正确", menu.get("1001") == 2450)

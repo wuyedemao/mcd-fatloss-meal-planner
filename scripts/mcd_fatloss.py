@@ -87,6 +87,7 @@ class Plan:
     score: float
     price_cents: int | None = None
     saved_cents: int = 0
+    priced_items: int = 0
     reasons: list[str] = field(default_factory=list)
 
     @property
@@ -228,12 +229,25 @@ def normalize_items(payload) -> list[Item]:
     return items
 
 
-_DRINK_WORDS = ("可乐", "雪碧", "芬达", "咖啡", "拿铁", "美式", "红茶", "绿茶", "奶茶", "牛奶", "豆浆",
-                "果汁", "矿泉水", "纯净水", "柠檬茶", "气泡", "零度", "无糖", "椰子水")
-_DESSERT_WORDS = ("派", "冰淇淋", "新地", "麦旋风", "甜筒", "圣代", "布朗尼", "蛋糕", "曲奇")
-_SIDE_WORDS = ("薯条", "薯饼", "玉米", "沙拉", "鸡块", "麦乐鸡", "鸡翅", "鸡排", "鸡柳", "洋葱圈",
-               "汤", "苹果", "蔬菜", "小食", "麦辣鸡翅", "那么大")
-_MAIN_WORDS = ("堡", "汉堡", "卷", "饭", "麦满分", "帕尼尼", "贝果", "bagel", "三明治", "意面", "鸡腿堡")
+_DRINK_WORDS = ("可乐", "雪碧", "芬达", "咖啡", "拿铁", "奶铁", "美式", "玛奇朵", "卡布奇诺", "雪冰",
+                "黑巧", "抹茶", "阿芙佳朵", "燕麦奶", "朱古力", "奶茶", "牛奶", "豆浆", "橙", "果汁",
+                "矿泉水", "纯净水", "茶", "气泡", "零度", "无糖", "椰子水", "怡泉", "美汁源", "麦旋酷", "+C")
+_DESSERT_WORDS = ("派", "冰淇淋", "新地", "麦旋风", "甜筒", "圣代", "布朗尼", "蛋糕", "曲奇",
+                  "奶冻", "拉明顿", "爆珠")
+_SIDE_WORDS = ("薯条", "薯饼", "玉米", "沙拉", "鸡块", "麦乐鸡", "鸡翅", "V翅", "鸡排", "鸡柳",
+               "洋葱圈", "汤", "苹果", "蔬菜", "小食", "脆汁鸡", "鸡球", "油条", "香肠", "那么大")
+_MAIN_WORDS = ("堡", "霸", "麦香鸡", "麦香鱼", "卷", "饭", "粥", "麦满分", "帕尼尼", "贝果",
+               "bagel", "三明治", "意面")
+
+# 早餐限定：午晚餐推荐里出现麦满分、油条会很出戏
+_BREAKFAST_ONLY = ("麦满分", "粥", "油条", "薯饼", "炒蛋")
+
+
+def filter_by_meal(items: list[Item], meal: str) -> list[Item]:
+    """午/晚餐不推早餐限定品，避免出现「午餐吃猪柳蛋麦满分」这种不合场景的推荐。"""
+    if meal == "breakfast":
+        return items
+    return [i for i in items if not any(w in i.name for w in _BREAKFAST_ONLY)]
 
 
 def classify(name: str) -> str:
@@ -531,24 +545,40 @@ def build_plans(
 # ---------------------------------------------------------------------------
 
 
+def _norm_name(value: str) -> str:
+    """菜名归一化：去掉空格、全角括号、书名号，便于跨接口按名字对齐。"""
+    return re.sub(r"[\s\u3000（）()\[\]【】「」『』\"'“”]", "", str(value)).lower()
+
+
 def build_coupon_index(payload) -> dict:
-    """把券列表压成 {商品编码: 券后价(分)}，取券价最低的那张。"""
-    index: dict[str, int] = {}
+    """把券列表压成两张表：按商品编码、按商品名称。
+
+    线上 list-nutrition-foods 不返回商品编码，只返 productName，
+    所以必须保留名称索引，否则永远算不出券后价。
+    """
+    by_code: dict[str, int] = {}
+    by_name: dict[str, int] = {}
     records = records_of(payload) or []
     for record in records:
         if not isinstance(record, dict):
             continue
         code = _pick(record, "productCode", "code", "mealCode", "skuCode", "couponProductCode")
+        name = _pick(record, "productName", "couponName", "name", "title", "mealName")
         price = _pick(record, "couponPrice", "price", "salePrice", "amount", "discountPrice")
-        if not code or price in (None, ""):
+        if price in (None, ""):
             continue
         value = _num(price)
         # 官方说明价格单位为「分」；小于 100 的数值按「元」兜底，避免不同接口单位不一致
         cents = int(round(value * 100)) if value < 100 else int(round(value))
-        key = str(code)
-        if key not in index or cents < index[key]:
-            index[key] = cents
-    return index
+        if code not in (None, ""):
+            key = str(code)
+            if key not in by_code or cents < by_code[key]:
+                by_code[key] = cents
+        if name:
+            key = _norm_name(name)
+            if key and (key not in by_name or cents < by_name[key]):
+                by_name[key] = cents
+    return {"by_code": by_code, "by_name": by_name}
 
 
 def build_price_index(payload) -> dict:
@@ -567,26 +597,35 @@ def build_price_index(payload) -> dict:
 
 
 def apply_pricing(plans: list[Plan], price_index: dict, coupon_index: dict) -> None:
+    """能算多少算多少：只对拿到价格的商品累加，并记录覆盖了几项。
+
+    营养接口不返回商品编码，只能靠名称与券对齐；拿不全时不编总价，
+    而是标明「3 项中 2 项有价」，比报一个假数字诚实。
+    """
+    by_code = coupon_index.get("by_code", {}) if isinstance(coupon_index, dict) else {}
+    by_name = coupon_index.get("by_name", {}) if isinstance(coupon_index, dict) else {}
     for plan in plans:
         total = 0
         saved = 0
-        known = True
-        for code in plan.codes:
-            menu = price_index.get(code)
-            coupon = coupon_index.get(code)
+        priced = 0
+        for item in plan.items:
+            norm = _norm_name(item.name)
+            menu = price_index.get(item.code) or price_index.get(norm)
+            coupon = by_code.get(item.code) or by_name.get(norm)
             if menu is not None and coupon is not None and coupon < menu:
                 total += coupon
                 saved += menu - coupon
-            elif menu is not None:
-                total += menu
+                priced += 1
             elif coupon is not None:
                 total += coupon
-            else:
-                known = False
-                break
-        if known and total > 0:
+                priced += 1
+            elif menu is not None:
+                total += menu
+                priced += 1
+        if priced:
             plan.price_cents = total
             plan.saved_cents = saved
+            plan.priced_items = priced
 
 
 def _yuan(cents: int | None) -> str:
@@ -632,6 +671,8 @@ def render_markdown(profile: dict, energy: dict, budget: dict, plans: list[Plan]
         lines.append("| 热量 | 蛋白质 | 脂肪 | 碳水 | 钠 | 价格 |")
         lines.append("| --- | --- | --- | --- | --- | --- |")
         price_text = _yuan(plan.price_cents)
+        if plan.price_cents is not None and plan.priced_items < len(plan.items):
+            price_text += "（%d/%d 项有价，其余以门店售价为准）" % (plan.priced_items, len(plan.items))
         if plan.saved_cents:
             price_text += "（用券省 %.2f 元）" % (plan.saved_cents / 100.0)
         lines.append("| %d kcal | %.0f g | %.0f g | %.0f g | %d mg | %s |" % (
@@ -671,6 +712,8 @@ def render_console(profile: dict, energy: dict, budget: dict, plans: list[Plan])
         return "\n".join(out)
     for rank, plan in enumerate(plans, start=1):
         price = _yuan(plan.price_cents)
+        if plan.price_cents is not None and plan.priced_items < len(plan.items):
+            price += " (%d/%d 项有价)" % (plan.priced_items, len(plan.items))
         if plan.saved_cents:
             price += " (省 %.2f)" % (plan.saved_cents / 100.0)
         out.append("[%d] %s" % (rank, plan.title))
@@ -799,6 +842,8 @@ def main(argv: list[str] | None = None) -> int:
         items, price_index, coupon_index, source = load_live(args.store_code, args.lat, args.lng)
     else:
         items, price_index, coupon_index, source = load_fixture()
+
+    items = filter_by_meal(items, args.meal)
 
     plans = build_plans(items, budget["budget_kcal"], top=3,
                         tolerance=budget["tolerance"], allow_dessert=args.allow_dessert)

@@ -16,7 +16,7 @@ from __future__ import annotations
 import csv
 import re
 
-_HEADER = re.compile(r"^(?P<key>[^\[\]:]+?)\[(?P<n>\d+)\]\{(?P<fields>[^}]*)\}:\s*$")
+_HEADER = re.compile(r"^(?P<key>[^\[\]:]*?)\[(?P<n>\d+)\]\{(?P<fields>[^}]*)\}:\s*$")
 _KV = re.compile(r"^(?P<key>[^:]+):\s?(?P<val>.*)$")
 _QUOTED = re.compile(r'^"(.*)"$')
 
@@ -76,7 +76,7 @@ def _parse_block(lines: list[tuple[int, str]], i: int, indent: int):
 
         header = _HEADER.match(content)
         if header:
-            key = header.group("key").strip()
+            key = header.group("key").strip() or "rows"
             fields = [f.strip() for f in header.group("fields").split(",") if f.strip()]
             rows = []
             i += 1
