@@ -124,9 +124,9 @@ python scripts/mcd_fatloss.py --sex female --age 26 --height 163 --weight 58 --m
 python scripts/mcd_fatloss.py --sex male --age 28 --height 178 --weight 82 \
   --meal lunch --store-code 1234567 --live
 
-# 按坐标找最近门店
+# 按城市找门店，拿到真实售价（推荐）
 python scripts/mcd_fatloss.py --sex male --age 28 --height 178 --weight 82 \
-  --meal lunch --lat 31.2304 --lng 121.4737 --live
+  --meal lunch --city 上海 --keyword 人民广场 --live
 
 # 输出 JSON，给上游 Agent 或工作流消费
 python scripts/mcd_fatloss.py --sex male --age 28 --height 178 --weight 82 --meal lunch --json

@@ -72,7 +72,7 @@ python scripts/mcd_fatloss.py --sex male --age 28 --height 178 --weight 82 \
 | 2 | `list-nutrition-foods` | 拿全部餐品的能量、蛋白质、脂肪、碳水、钠、钙 |
 | 3 | `available-coupons` | 拿麦麦省当前可领的券（券价通常远低于菜单价） |
 | 4 | `query-store-coupons` | 有门店编码时，拿该门店实际可用的券 |
-| 5 | `query-nearby-stores` → `query-meals` | 有位置信息时，拿门店菜单与真实售价 |
+| 5 | `query-nearby-stores` → `query-meals` | 用户给了城市时，先查门店再拉真实售价（`beType=1, searchType=2, city=…`） |
 | 6 | `calculate-price` | 确认最终应付金额（返回单位是**分**，展示前除以 100） |
 
 注意事项：

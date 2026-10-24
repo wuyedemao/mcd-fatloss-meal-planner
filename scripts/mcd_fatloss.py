@@ -612,17 +612,28 @@ def build_coupon_index(payload) -> dict:
 
 
 def build_price_index(payload) -> dict:
-    """菜单价 {商品编码: 价格(分)}。麦当劳 price 接口返回单位是分。"""
+    """菜单价索引，同时按商品编码和归一化名称建表。
+
+    营养表只给 productName 不给编码，所以名称索引是拿到价格的唯一桥梁。
+    价格单位是分；小于 100 的值按元兜底。
+    """
     index: dict[str, int] = {}
     for record in records_of(payload) or []:
         if not isinstance(record, dict):
             continue
         code = _pick(record, "code", "mealCode", "productCode", "skuCode", "itemCode")
+        name = _pick(record, "name", "mealName", "productName", "title")
         price = _pick(record, "price", "salePrice", "originalPrice", "amount", "currentPrice")
-        if not code or price in (None, ""):
+        if price in (None, ""):
             continue
         value = _num(price)
-        index[str(code)] = int(round(value * 100)) if value < 100 else int(round(value))
+        if value <= 0:
+            continue
+        cents = int(round(value * 100)) if value < 100 else int(round(value))
+        if code not in (None, ""):
+            index[str(code)] = cents
+        if name:
+            index.setdefault(_norm_name(name), cents)
     return index
 
 
@@ -774,7 +785,7 @@ def load_fixture() -> tuple[list[Item], dict, dict, str]:
     return items, prices, coupons, "离线演示数据（fixtures/，非官方实时数据，仅用于流程验证）"
 
 
-def load_live(store_code: str | None = None, lat: float | None = None, lng: float | None = None):
+def load_live(store_code: str | None = None, city: str | None = None, keyword: str | None = None):
     from mcp_client import McdMcpClient, McpError  # 延迟导入，离线模式下不需要
 
     client = McdMcpClient()
@@ -815,12 +826,19 @@ def load_live(store_code: str | None = None, lat: float | None = None, lng: floa
     price_index: dict = {}
     resolved_store = store_code
     try:
-        if not resolved_store and lat is not None and lng is not None:
-            stores = records_of(fetch("query-nearby-stores", {"lat": lat, "lng": lng}))
+        if not resolved_store and city:
+            # query-nearby-stores 没有经纬度参数，只能按城市/关键词找
+            query = {"beType": 1, "searchType": 2, "city": city}
+            if keyword:
+                query["keyword"] = keyword
+            stores = records_of(fetch("query-nearby-stores", query))
             if stores:
                 resolved_store = str(_pick(stores[0], "storeCode", "code", "id") or "")
         if resolved_store:
-            price_index = build_price_index(fetch("query-meals", {"storeCode": resolved_store}))
+            # 到店自取：orderType=1 / beType=1，beCode 不要传（传了会报错）
+            price_index = build_price_index(
+                fetch("query-meals", {"storeCode": resolved_store, "orderType": 1, "beType": 1})
+            )
     except McpError:
         price_index = {}
 
@@ -849,8 +867,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--meal", choices=list(MEAL_SHARE), default="lunch")
     parser.add_argument("--allow-dessert", action="store_true", help="允许把甜点纳入候选（默认排除）")
     parser.add_argument("--store-code", default=None, help="门店编码，用于拉菜单价与门店可用券")
-    parser.add_argument("--lat", type=float, default=None)
-    parser.add_argument("--lng", type=float, default=None)
+    parser.add_argument("--city", default=None, help="城市名，用于查门店从而拿到真实售价")
+    parser.add_argument("--keyword", default=None, help="门店关键词，配合 --city 缩小范围")
     parser.add_argument("--live", action="store_true", help="调用真实麦当劳 MCP（需要 MCD_MCP_TOKEN）")
     parser.add_argument("--json", action="store_true", help="输出 JSON，便于被上游 Agent 消费")
     parser.add_argument("--out", default=None, help="把 Markdown 结果写入文件")
@@ -869,7 +887,7 @@ def main(argv: list[str] | None = None) -> int:
     budget = meal_budget(energy["target_kcal"], args.meal)
 
     if args.live:
-        items, price_index, coupon_index, source = load_live(args.store_code, args.lat, args.lng)
+        items, price_index, coupon_index, source = load_live(args.store_code, args.city, args.keyword)
     else:
         items, price_index, coupon_index, source = load_fixture()
 
