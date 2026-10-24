@@ -589,23 +589,31 @@ def collect_menu_codes(payload) -> list[str]:
     return ordered
 
 
-def parse_meal_detail(payload) -> dict:
-    """从餐品详情里抠出「名称 + 价格(分)」，抠不到就返回空字典。"""
-    result: dict = {}
+_PRICE_KEYS = ("salePrice", "price", "currentPrice", "unitPrice",
+               "totalAmount", "payAmount", "totalPrice", "amount")
+
+
+def price_index_from_calculate(payload) -> dict:
+    """从 calculate-price 的返回里提取「餐品名 → 单价(分)」。
+
+    该接口会把每个商品的名称和金额一起返回，正好补上「营养表有名称、菜单只有编码」的断层。
+    """
+    index: dict = {}
     for node in _walk_dicts(smart_parse(payload)):
-        name = _pick(node, "productName", "mealName", "title", "name", contains=("name",))
-        price = _pick(node, "salePrice", "price", "originalPrice", "currentPrice", "amount")
+        name = node.get("productName") or node.get("mealName") or node.get("name")
         if not name:
             continue
-        result.setdefault("name", str(name))
-        if price in (None, ""):
-            continue
-        value = _num(price)
-        if value <= 0:
-            continue
-        cents = int(round(value * 100)) if value < 100 else int(round(value))
-        return {"name": str(name), "price_cents": cents}
-    return result
+        for key in _PRICE_KEYS:
+            if key not in node:
+                continue
+            value = _num(node.get(key))
+            if value <= 0:
+                continue
+            cents = int(round(value * 100)) if value < 100 else int(round(value))
+            if 100 <= cents <= 20000:
+                index[_norm_name(str(name))] = cents
+            break
+    return index
 
 
 def _norm_name(value: str) -> str:
@@ -868,12 +876,13 @@ def load_live(store_code: str | None = None, city: str | None = None, keyword: s
             pass
         return text
 
-    detail_cache_path = os.path.join(raw_dir, "_detail_cache.json")
+    price_cache_path = os.path.join(raw_dir, "_price_index.json")
 
     def resolve_prices(store: str) -> dict:
-        """query-meals 只有编码，营养表只有菜名，靠逐条 query-meal-detail 打通。
+        """价格只能由 calculate-price 算出来。
 
-        结果缓存到本地，第二次跑直接读缓存，不再重复调用。
+        query-meal-detail 只给套餐组成和加料差价，没有单品售价；
+        所以把菜单编码分批发给 calculate-price，一次拿回「名称 + 价格」。
         """
         menu_text = fetch("query-meals", {"storeCode": store, "orderType": 1, "beType": 1})
         codes = collect_menu_codes(menu_text)
@@ -882,54 +891,49 @@ def load_live(store_code: str | None = None, city: str | None = None, keyword: s
 
         cache: dict = {}
         try:
-            with open(detail_cache_path, encoding="utf-8") as fh:
-                cache = json.load(fh)
+            with open(price_cache_path, encoding="utf-8") as fh:
+                cached = json.load(fh)
+            if cached.get("store") == store and cached.get("codes") == codes:
+                return cached.get("index", {})
+            cache = cached.get("index", {})
         except (OSError, json.JSONDecodeError):
             cache = {}
 
-        index: dict = {}
-        fetched = 0
-        for code in codes:
-            entry = cache.get(code)
-            if entry is None:
-                if fetched >= max_detail:
-                    break
-                try:
-                    text = client.call_tool(
-                        "query-meal-detail",
-                        {"storeCode": store, "orderType": 1, "beType": 1, "code": code},
-                    )
-                except McpError:
-                    continue
-                if fetched == 0:
-                    try:
-                        with open(os.path.join(raw_dir, "meal_detail_sample.txt"), "w", encoding="utf-8") as fh:
-                            fh.write(text)
-                    except OSError:
-                        pass
-                fetched += 1
-                entry = parse_meal_detail(text) or {"_empty": True}
-                cache[code] = entry
-                if fetched % 25 == 0:
-                    sys.stderr.write("[价格] 已拉取 %d/%d 条餐品详情\n" % (fetched, min(len(codes), max_detail)))
-                    sys.stderr.flush()
-
-            if not entry or entry.get("_empty"):
+        index: dict = dict(cache)
+        dumped = False
+        chunk_size = 40
+        for start in range(0, len(codes), chunk_size):
+            chunk = codes[start:start + chunk_size]
+            items = [{"productCode": code, "quantity": 1} for code in chunk]
+            try:
+                text = client.call_tool(
+                    "calculate-price",
+                    {"storeCode": store, "orderType": 1, "beType": 1, "items": items},
+                )
+            except McpError as exc:
+                sys.stderr.write("[价格] 批次 %d-%d 失败：%s\n" % (start + 1, start + len(chunk), exc))
                 continue
-            cents = entry.get("price_cents")
-            if cents:
-                index[code] = cents
-                if entry.get("name"):
-                    index[_norm_name(entry["name"])] = cents
+            if not dumped:
+                try:
+                    with open(os.path.join(raw_dir, "calculate_price_sample.txt"), "w", encoding="utf-8") as fh:
+                        fh.write(text)
+                except OSError:
+                    pass
+                dumped = True
+            index.update(price_index_from_calculate(text))
+            sys.stderr.write("[价格] 批次 %d-%d 完成，累计 %d 条\n"
+                             % (start + 1, start + len(chunk), len(index)))
+            sys.stderr.flush()
 
         try:
-            with open(detail_cache_path, "w", encoding="utf-8") as fh:
-                json.dump(cache, fh, ensure_ascii=False)
+            with open(price_cache_path, "w", encoding="utf-8") as fh:
+                json.dump({"store": store, "codes": codes, "index": index}, fh, ensure_ascii=False)
         except OSError:
             pass
         sys.stderr.write("[价格] 已建立 %d 条价格映射\n" % len(index))
         sys.stderr.flush()
         return index
+
 
     nutrition_text = fetch("list-nutrition-foods")
     items = normalize_items(nutrition_text)
