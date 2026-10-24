@@ -70,7 +70,7 @@ BMR 1798 · TDEE 2472 · 日目标 2021 kcal · 缺口 451 kcal · BMI 25.9
 
 ```bash
 # 克隆到本地
-git clone https://github.com/YOUR_GITHUB_USERNAME/mcd-fatloss-meal-planner.git
+git clone https://github.com/wuyedemao/mcd-fatloss-meal-planner.git
 cd mcd-fatloss-meal-planner
 
 # 装进 WorkBuddy 的技能目录（在仓库根目录执行）

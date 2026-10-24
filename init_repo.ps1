@@ -41,7 +41,7 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "没有需要提交的改动"
 }
 
-$remote = "https://github.com/$UserName/$RepoName.git"
+$remote = "git@github.com:$UserName/$RepoName.git"   # 走 SSH；若本机 HTTPS 可用，可改为 https 地址
 $existing = git remote 2>$null
 if ($existing -contains "origin") { git remote set-url origin $remote } else { git remote add origin $remote }
 

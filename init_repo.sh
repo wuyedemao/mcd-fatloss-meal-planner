@@ -47,7 +47,7 @@ else
       commit -q -m "feat: 麦麦减脂配餐助手 - 基于麦当劳 MCP 的减脂配餐 Skill"
 fi
 
-REMOTE="https://github.com/${USER_NAME}/${REPO_NAME}.git"
+REMOTE="git@github.com:${USER_NAME}/${REPO_NAME}.git"   # 走 SSH；若本机 HTTPS 可用，可改为 https 地址
 if git remote get-url origin >/dev/null 2>&1; then
   git remote set-url origin "$REMOTE"
 else
