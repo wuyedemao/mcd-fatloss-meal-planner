@@ -201,10 +201,37 @@ def preflight(url: str | None = None, token: str | None = None) -> dict:
 
 
 if __name__ == "__main__":
+    import argparse
     import sys
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+
+    ap = argparse.ArgumentParser(description="麦当劳 MCP 连通性自检 / 原始返回抓取")
+    ap.add_argument("--dump", metavar="TOOL", help="调用指定工具并把原始返回存成文件，如 list-nutrition-foods")
+    ap.add_argument("--out", default=None, help="保存路径，默认 docs/_raw/<tool>.txt")
+    ap.add_argument("--args", default="{}", help="工具入参 JSON，默认 {}")
+    ns = ap.parse_args()
+
+    if ns.dump:
+        import os
+
+        try:
+            client = McdMcpClient()
+            client.initialize()
+            text = client.call_tool(ns.dump, json.loads(ns.args))
+            out = ns.out or os.path.join("docs", "_raw", ns.dump + ".txt")
+            os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+            with open(out, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            print("已保存 %d 字符 -> %s" % (len(text), out))
+            print("--- 前 800 字符 ---")
+            print(text[:800])
+        except McpError as exc:
+            print(f"[失败] {exc}")
+            raise SystemExit(1)
+        raise SystemExit(0)
+
     try:
         print(json.dumps(preflight(), ensure_ascii=False, indent=2))
     except McpError as exc:

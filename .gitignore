@@ -6,3 +6,6 @@ venv/
 docs/live-output.md
 .DS_Store
 Thumbs.db
+
+# 真实 MCP 原始返回（可能含门店/账号信息，不提交）
+docs/_raw/

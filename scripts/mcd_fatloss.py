@@ -18,6 +18,8 @@ import re
 import sys
 from dataclasses import dataclass, field, asdict
 
+from toon import toon_decode, toon_rows
+
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
@@ -152,10 +154,49 @@ def find_records(payload) -> list[dict]:
     return []
 
 
+def smart_parse(value, depth: int = 0):
+    """把「JSON / TOON / 二次包装的字符串」统一解成 Python 对象。
+
+    麦当劳 MCP 的返回可能是三层任一形态：
+    1. 裸 JSON 对象；
+    2. `{"success":true,"code":200,"data":{...}}` 这种网关信封，真正的数据在 data 里；
+    3. data 里放着一整段 TOON 文本（不是 JSON）。
+    线上第一版只处理了第 1 种，遇到第 2/3 种就会解出 0 条餐品——这里做递归拆包。
+    """
+    if depth > 8:
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return value
+        if text[0] in "{[":
+            try:
+                return smart_parse(json.loads(text), depth + 1)
+            except json.JSONDecodeError:
+                pass
+        decoded = toon_decode(text)
+        if decoded is not None and find_records(decoded):
+            return smart_parse(decoded, depth + 1)
+        rows = toon_rows(text)
+        if rows:
+            return rows
+        return value
+    if isinstance(value, dict):
+        return {k: smart_parse(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, list):
+        return [smart_parse(v, depth + 1) for v in value]
+    return value
+
+
+def records_of(payload) -> list[dict]:
+    """先拆包再找列表，线上和离线都走这一条路径。"""
+    return find_records(smart_parse(payload))
+
+
 def normalize_items(payload) -> list[Item]:
     items: list[Item] = []
     seen: set[str] = set()
-    for index, record in enumerate(find_records(payload)):
+    for index, record in enumerate(records_of(payload)):
         if not isinstance(record, dict):
             continue
         name = _pick(record, "name", "mealName", "productName", "title", "foodName", contains=("餐品名", "名称"))
@@ -493,7 +534,7 @@ def build_plans(
 def build_coupon_index(payload) -> dict:
     """把券列表压成 {商品编码: 券后价(分)}，取券价最低的那张。"""
     index: dict[str, int] = {}
-    records = find_records(payload) or []
+    records = records_of(payload) or []
     for record in records:
         if not isinstance(record, dict):
             continue
@@ -513,7 +554,7 @@ def build_coupon_index(payload) -> dict:
 def build_price_index(payload) -> dict:
     """菜单价 {商品编码: 价格(分)}。麦当劳 price 接口返回单位是分。"""
     index: dict[str, int] = {}
-    for record in find_records(payload) or []:
+    for record in records_of(payload) or []:
         if not isinstance(record, dict):
             continue
         code = _pick(record, "code", "mealCode", "productCode", "skuCode", "itemCode")
@@ -666,19 +707,34 @@ def load_live(store_code: str | None = None, lat: float | None = None, lng: floa
     client = McdMcpClient()
     client.initialize()
 
-    nutrition_raw = client.call_json("list-nutrition-foods", {})
-    items = normalize_items(nutrition_raw)
-    if not items:
-        raise McpError("list-nutrition-foods 未返回可解析的餐品营养数据")
+    raw_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs", "_raw")
 
-    coupons_raw = {}
-    for tool in ("available-coupons", "query-store-coupons"):
-        args = {}
-        if tool == "query-store-coupons" and store_code:
-            args["storeCode"] = store_code
+    def fetch(tool: str, args: dict | None = None) -> str:
+        """调工具并把原始返回落盘。线上格式一旦变了，有原始样本才能修。"""
+        text = client.call_tool(tool, args or {})
         try:
-            coupons_raw = client.call_json(tool, args)
-            if find_records(coupons_raw):
+            os.makedirs(raw_dir, exist_ok=True)
+            with open(os.path.join(raw_dir, tool + ".txt"), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except OSError:
+            pass
+        return text
+
+    nutrition_text = fetch("list-nutrition-foods")
+    items = normalize_items(nutrition_text)
+    if not items:
+        raise McpError(
+            "list-nutrition-foods 未返回可解析的餐品营养数据。原始返回已保存到 %s，"
+            "把这行路径告诉开发者即可定位格式差异。"
+            % os.path.join(raw_dir, "list-nutrition-foods.txt")
+        )
+
+    coupons_text = ""
+    for tool in ("available-coupons", "query-store-coupons"):
+        args = {"storeCode": store_code} if (tool == "query-store-coupons" and store_code) else {}
+        try:
+            coupons_text = fetch(tool, args)
+            if records_of(coupons_text):
                 break
         except McpError:
             continue
@@ -687,17 +743,17 @@ def load_live(store_code: str | None = None, lat: float | None = None, lng: floa
     resolved_store = store_code
     try:
         if not resolved_store and lat is not None and lng is not None:
-            stores = find_records(client.call_json("query-nearby-stores", {"lat": lat, "lng": lng}))
+            stores = records_of(fetch("query-nearby-stores", {"lat": lat, "lng": lng}))
             if stores:
                 resolved_store = str(_pick(stores[0], "storeCode", "code", "id") or "")
         if resolved_store:
-            price_index = build_price_index(client.call_json("query-meals", {"storeCode": resolved_store}))
+            price_index = build_price_index(fetch("query-meals", {"storeCode": resolved_store}))
     except McpError:
         price_index = {}
 
     source = "麦当劳 MCP 实时数据：list-nutrition-foods / available-coupons%s" % (
         " / query-meals" if price_index else "")
-    return items, price_index, build_coupon_index(coupons_raw), source
+    return items, price_index, build_coupon_index(coupons_text), source
 
 
 # ---------------------------------------------------------------------------
